@@ -1,5 +1,0 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-shapely>=2.0
-pyosmium>=3.6.0
-apscheduler>=3.10.0

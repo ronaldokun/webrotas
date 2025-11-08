@@ -1,7 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "webrotas"
 version = "0.1.0"
-description = "Add your description here"
+description = "OSRM routing with custom avoid zones for penalizing areas"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "apscheduler>=3.11.1",
+    "docker>=7.1.0",
+    "fastapi>=0.121.0",
+    "osmium>=4.2.0",
+    "shapely>=2.1.2",
+    "uvicorn[standard]>=0.38.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.uv]
+default-groups = ["avoidzones"]
+
+[[tool.uv.override]]
+name = "pyosmium"
+version = ">=3.6.0"

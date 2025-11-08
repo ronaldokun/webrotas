@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 WORKDIR /app
-COPY requirements.txt /app/
-RUN /root/.cargo/bin/uv pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml /app/
+RUN /root/.cargo/bin/uv sync --no-cache
 
 COPY app.py cutter.py /app/
 
 EXPOSE 9090
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9090"]
+CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9090"]

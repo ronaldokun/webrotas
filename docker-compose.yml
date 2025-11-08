@@ -84,18 +84,23 @@ services:
 
   avoidzones:
     build:
-      context: ./avoidzones
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./avoidzones/Dockerfile
     container_name: avoidzones
+    depends_on:
+      - osrm
     environment:
       OSRM_PROFILE: ${OSRM_PROFILE}
       PBF_NAME: ${PBF_NAME}
       OSRM_BASE: ${OSRM_BASE}
       AVOIDZONES_TOKEN: ${AVOIDZONES_TOKEN}
+      OSM_PBF_URL: ${OSM_PBF_URL}
+      REFRESH_CRON_HOUR: ${REFRESH_CRON_HOUR:-2}
+      OSRM_DATA: ${OSRM_DATA}
     volumes:
       - ${OSRM_DATA}:/data
       - ${OSRM_DATA}/profiles:/profiles:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # (optional) for 'docker restart osrm'
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "9090:9090"
 
