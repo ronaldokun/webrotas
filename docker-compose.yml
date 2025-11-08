@@ -1,27 +1,27 @@
 services:
-  pbf_fetcher:
-    image: curlimages/curl:8.10.1
-    container_name: pbf_fetcher
-    command: >
-      sh -lc "
-        set -euo pipefail;
-        echo '[pbf_fetcher] Downloading ${OSM_PBF_URL} -> /data/${PBF_NAME}';
-        curl -L --fail --max-time 3600 --connect-timeout 30 -C - --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
-        mv /data/${PBF_NAME}.tmp /data/${PBF_NAME};
-        ls -lh /data/${PBF_NAME};
-        echo '[pbf_fetcher] Done.'
-      "
-    env_file: .env
-    volumes:
-      - ${OSRM_DATA}:/data
-    restart: "no"
+  # pbf_fetcher:
+  #   image: curlimages/curl:8.10.1
+  #   container_name: pbf_fetcher
+  #   command: >
+  #     sh -lc "
+  #       set -euo pipefail;
+  #       echo '[pbf_fetcher] Downloading ${OSM_PBF_URL} -> /data/${PBF_NAME}';
+  #       curl -L --fail --max-time 3600 --connect-timeout 30 -C - --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
+  #       mv /data/${PBF_NAME}.tmp /data/${PBF_NAME};
+  #       ls -lh /data/${PBF_NAME};
+  #       echo '[pbf_fetcher] Done.'
+  #     "
+  #   env_file: .env
+  #   volumes:
+  #     - ${OSRM_DATA}:/data
+  #   restart: "no"
 
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:latest
     container_name: osrm
-    depends_on:
-      pbf_fetcher:
-        condition: service_completed_successfully
+    # depends_on:
+    #   pbf_fetcher:
+    #     condition: service_completed_successfully
     volumes:
       - ${OSRM_DATA}:/data
       - ${OSRM_DATA}/profiles:/profiles:ro
@@ -35,7 +35,7 @@ services:
         echo '[osrm] Customize';
         osrm-customize /data/${OSRM_BASE}.osrm;
         echo '[osrm] Serving on :5000';
-        osrm-routed --algorithm mld /data/${OSRM_BASE}.osrm
+        osrm-routed --max-matching-size 1000 --max-table-size 1000 --max-viaroute-size 1000 --algorithm mld /data/${OSRM_BASE}.osrm
       "
     env_file: .env
     ports:
@@ -44,12 +44,12 @@ services:
   tile_import:
     image: overv/openstreetmap-tile-server:latest
     container_name: tile_import
-    depends_on:
-      pbf_fetcher:
-        condition: service_completed_successfully
+    # depends_on:
+    #   pbf_fetcher:
+    #     condition: service_completed_successfully
     volumes:
-      - ${OSRM_DATA}:/data:ro
-      - tiles-db:/var/lib/postgresql/14/main
+      - ${OSRM_DATA}:/data
+      - tiles-db:/var/lib/postgresql/15/main
     environment:
       UPDATES: "disabled"
     command: "import"
@@ -63,12 +63,12 @@ services:
         condition: service_completed_successfully
     volumes:
       - ${OSRM_DATA}:/data:ro
-      - tiles-db:/var/lib/postgresql/14/main
+      - tiles-db:/var/lib/postgresql/15/main
     environment:
       UPDATES: "disabled"
     command: "run"
     ports:
-      - "8080:80"
+      - "8090:80"
 
   frontend:
     image: nginx:alpine
@@ -102,7 +102,13 @@ services:
       - ${OSRM_DATA}/profiles:/profiles:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "5002:5002"
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
 
 volumes:
   tiles-db:

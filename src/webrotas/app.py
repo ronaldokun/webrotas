@@ -4,15 +4,15 @@ import subprocess
 import docker
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
-from fastapi import FastAPI, HTTPException, Depends, Request, FileResponse
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from cutter import apply_penalties
+from .cutter import apply_penalties
 
 # ============================================================================
 # Configuration
@@ -352,7 +352,7 @@ def setup_scheduler():
 scheduler = setup_scheduler()
 
 
-@app.lifespan("shutdown")
+@app.on_event("shutdown")
 async def shutdown_event():
     """Clean up scheduler on shutdown."""
     scheduler.shutdown()

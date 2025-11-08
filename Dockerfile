@@ -31,6 +31,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.13-slim-bookworm
 
+# Install system dependencies for osmium and other packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libexpat1 libproj25 proj-data libc6 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Setup a non-root user
 RUN groupadd --system --gid 999 nonroot \
     && useradd --system --gid 999 --uid 999 --create-home nonroot
@@ -49,19 +54,10 @@ WORKDIR /app
 
 
 # Expose port
-EXPOSE 5002
+EXPOSE 9090
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5002/docs').read()" || exit 1
-
-# # Run FastAPI application
-# CMD ["fastapi", "run", "src/webrotas/main.py", "--host", "0.0.0.0", "--port", "5002"]
-
-
-
-# EXPOSE 9090
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5002"]
+# Run FastAPI application
+CMD ["uvicorn", "webrotas.app:app", "--host", "0.0.0.0", "--port", "9090"]

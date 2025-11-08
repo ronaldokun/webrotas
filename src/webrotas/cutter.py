@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from typing import List
-import pyosmium as osm
+import osmium as osm
 from shapely.geometry import shape
 from shapely.strtree import STRtree
 from shapely import wkb as shapely_wkb
