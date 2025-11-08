@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>OSRM + Tiles + AvoidZones (with History)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="./style.css" />
+</head>
+
+<body>
+    <div id="map"></div>
+
+    <div class="panel">
+        <div class="sec">
+            <strong>API Token</strong><br>
+            <input id="token" placeholder="Bearer token" />
+        </div>
+
+        <div class="sec">
+            <strong>Avoid Zones</strong><br>
+            <button id="apply">Apply & Rebuild OSRM</button>
+            <span id="status">status: idle</span>
+            <div class="hint">Draw polygons or rectangles, then Apply.</div>
+        </div>
+
+        <div class="sec">
+            <strong>Quick Route</strong><br>
+            <div>Lng,Lat A: <input id="a" value="-46.70,-23.55"></div>
+            <div>Lng,Lat B: <input id="b" value="-46.63,-23.55"></div>
+            <button id="route">Route</button>
+            <div>Dur: <span id="dur">—</span> | Dist: <span id="dist">—</span></div>
+        </div>
+
+        <div class="sec">
+            <strong>History</strong>
+            <button id="refresh-history">Refresh</button>
+            <ul id="history"></ul>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <script>
+        const TILE_URL = 'http://localhost:8080/tile/{z}/{x}/{y}.png';
+        const OSRM_URL = 'http://localhost:5000';
+        const API_URL = 'http://localhost:9090';
+
+        const map = L.map('map').setView([-23.55, -46.66], 11);
+        L.tileLayer(TILE_URL, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+
+        const drawnItems = new L.FeatureGroup(); map.addLayer(drawnItems);
+        const drawControl = new L.Control.Draw({
+            draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false },
+            edit: { featureGroup: drawnItems }
+        });
+        map.addControl(drawControl);
+        map.on(L.Draw.Event.CREATED, e => drawnItems.addLayer(e.layer));
+
+        let routeLayer = L.geoJSON(null, { style: { weight: 5 } }).addTo(map);
+
+        function status(s) { document.getElementById('status').textContent = 'status: ' + s; }
+        function token() { return document.getElementById('token').value.trim(); }
+        function authHeaders() {
+            const t = token(); return t ? { 'Authorization': 'Bearer ' + t } : {};
+        }
+
+        async function doRoute() {
+            routeLayer.clearLayers();
+            const a = document.getElementById('a').value.trim();
+            const b = document.getElementById('b').value.trim();
+            const url = `${OSRM_URL}/route/v1/driving/${a};${b}?overview=full&geometries=geojson`;
+            const res = await fetch(url); const json = await res.json();
+            if (!json.routes?.length) { alert('No route found'); return; }
+            const r = json.routes[0];
+            routeLayer.addData({ type: 'Feature', geometry: r.geometry });
+            const [minLng, minLat, maxLng, maxLat] = bbox(r.geometry.coordinates);
+            map.fitBounds([[minLat, minLng], [maxLat, maxLng]]);
+            document.getElementById('dur').textContent = (r.duration / 60).toFixed(1) + ' min';
+            document.getElementById('dist').textContent = (r.distance / 1000).toFixed(1) + ' km';
+        }
+        function bbox(coords) { let mnL = 1e9, mnB = 1e9, mxL = -1e9, mxB = -1e9; for (const [x, y] of coords) { if (x < mnL) mnL = x; if (y < mnB) mnB = y; if (x > mxL) mxL = x; if (y > mxB) mxB = y } return [mnL, mnB, mxL, mxB] }
+
+        document.getElementById('route').onclick = doRoute;
+
+        // Apply polygons → service → penalize → rebuild OSRM
+        document.getElementById('apply').onclick = async () => {
+            const fc = {
+                type: 'FeatureCollection',
+                features: drawnItems.getLayers().map(l => l.toGeoJSON())
+            };
+            status('uploading…');
+            const res = await fetch(`${API_URL}/avoidzones/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(fc)
+            });
+            if (!res.ok) { status('error'); alert(await res.text()); return; }
+            const j = await res.json();
+            status(j.status || 'done');
+            alert('Applied. OSRM rebuilt. Try routing again.');
+            await refreshHistory();
+        };
+
+        async function refreshHistory() {
+            const ul = document.getElementById('history'); ul.innerHTML = '';
+            const res = await fetch(`${API_URL}/avoidzones/history`, { headers: authHeaders() });
+            if (!res.ok) { ul.innerHTML = '<li>Failed to load history</li>'; return; }
+            const list = await res.json(); // [{filename, ts, size}]
+            if (!list.length) { ul.innerHTML = '<li>(no history yet)</li>'; return; }
+            for (const item of list) {
+                const li = document.createElement('li');
+                const a = document.createElement('a');
+                a.href = `${API_URL}/avoidzones/download/${encodeURIComponent(item.filename)}`;
+                a.textContent = `${item.ts} — ${item.filename} (${item.size})`;
+                a.target = '_blank';
+                
+                const editBtn = document.createElement('button');
+                editBtn.textContent = 'Edit';
+                editBtn.onclick = async () => {
+                    try {
+                        const downloadRes = await fetch(
+                            `${API_URL}/avoidzones/download/${encodeURIComponent(item.filename)}`,
+                            { headers: authHeaders() }
+                        );
+                        if (!downloadRes.ok) { alert('Failed to load configuration'); return; }
+                        const geojson = await downloadRes.json();
+                        
+                        // Clear current drawings
+                        drawnItems.clearLayers();
+                        
+                        // Load features from history into the drawing interface
+                        if (geojson.features && geojson.features.length) {
+                            for (const feature of geojson.features) {
+                                const layer = L.geoJSON(feature).getLayers()[0];
+                                if (layer) drawnItems.addLayer(layer);
+                            }
+                        }
+                        alert('Loaded into editor. Modify and click Apply to create a new version.');
+                    } catch (e) {
+                        alert('Error loading configuration: ' + e.message);
+                    }
+                };
+                
+                const revertBtn = document.createElement('button');
+                revertBtn.textContent = 'Revert';
+                revertBtn.onclick = async () => {
+                    if (!confirm(`Revert to ${item.filename}?`)) return;
+                    const r = await fetch(`${API_URL}/avoidzones/revert`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                        body: JSON.stringify({ filename: item.filename })
+                    });
+                    if (!r.ok) { alert(await r.text()); return; }
+                    const jj = await r.json();
+                    alert('Reverted and rebuilt OSRM.');
+                    await refreshHistory();
+                };
+                
+                li.appendChild(a); 
+                li.appendChild(document.createTextNode(' '));
+                li.appendChild(editBtn);
+                li.appendChild(document.createTextNode(' '));
+                li.appendChild(revertBtn);
+                ul.appendChild(li);
+            }
+        }
+        document.getElementById('refresh-history').onclick = refreshHistory;
+        refreshHistory();
+    </script>
+</body>
+
+</html>

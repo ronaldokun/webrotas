@@ -1,0 +1,52 @@
+html,
+body,
+#map {
+    height: 100%;
+    margin: 0;
+}
+
+.panel {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 9999;
+    background: rgba(255, 255, 255, .95);
+    padding: 10px;
+    border-radius: 8px;
+    font: 14px/1.35 system-ui, sans-serif;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, .2);
+    width: 310px;
+}
+
+.panel .sec {
+    margin-bottom: 10px;
+}
+
+.panel input {
+    width: 180px;
+    margin: 2px 0;
+}
+
+.panel button {
+    margin-top: 6px;
+}
+
+.panel .hint {
+    color: #666;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+#history {
+    max-height: 220px;
+    overflow: auto;
+    padding-left: 18px;
+}
+
+#history li {
+    margin: 4px 0;
+}
+
+#history button {
+    margin-left: 6px;
+}

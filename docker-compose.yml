@@ -1,0 +1,103 @@
+services:
+  pbf_fetcher:
+    image: curlimages/curl:8.10.1
+    container_name: pbf_fetcher
+    command: >
+      sh -lc "
+        set -euo pipefail;
+        echo '[pbf_fetcher] Downloading ${OSM_PBF_URL} -> /data/${PBF_NAME}';
+        curl -L --fail --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
+        mv /data/${PBF_NAME}.tmp /data/${PBF_NAME};
+        ls -lh /data/${PBF_NAME};
+        echo '[pbf_fetcher] Done.'
+      "
+    env_file: .env
+    volumes:
+      - ${OSRM_DATA}:/data
+    restart: "no"
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    container_name: osrm
+    depends_on:
+      pbf_fetcher:
+        condition: service_completed_successfully
+    volumes:
+      - ${OSRM_DATA}:/data
+      - ${OSRM_DATA}/profiles:/profiles:ro
+    command: >
+      sh -lc "
+        set -euo pipefail;
+        echo '[osrm] Extract';
+        osrm-extract -p ${OSRM_PROFILE} /data/${PBF_NAME};
+        echo '[osrm] Partition';
+        osrm-partition /data/${OSRM_BASE}.osrm;
+        echo '[osrm] Customize';
+        osrm-customize /data/${OSRM_BASE}.osrm;
+        echo '[osrm] Serving on :5000';
+        osrm-routed --algorithm mld /data/${OSRM_BASE}.osrm
+      "
+    env_file: .env
+    ports:
+      - "5000:5000"
+
+  tile_import:
+    image: overv/openstreetmap-tile-server:latest
+    container_name: tile_import
+    depends_on:
+      pbf_fetcher:
+        condition: service_completed_successfully
+    volumes:
+      - ${OSRM_DATA}:/data:ro
+      - tiles-db:/var/lib/postgresql/14/main
+    environment:
+      UPDATES: "disabled"
+    command: "import"
+    restart: "no"
+
+  tile_server:
+    image: overv/openstreetmap-tile-server:latest
+    container_name: osmtiles
+    depends_on:
+      tile_import:
+        condition: service_completed_successfully
+    volumes:
+      - ${OSRM_DATA}:/data:ro
+      - tiles-db:/var/lib/postgresql/14/main
+    environment:
+      UPDATES: "disabled"
+    command: "run"
+    ports:
+      - "8080:80"
+
+  frontend:
+    image: nginx:alpine
+    container_name: demo_frontend
+    depends_on:
+      - osrm
+      - tile_server
+      - avoidzones
+    volumes:
+      - ${OSRM_DATA}/frontend:/usr/share/nginx/html:ro
+    ports:
+      - "8081:80"
+
+  avoidzones:
+    build:
+      context: ./avoidzones
+      dockerfile: Dockerfile
+    container_name: avoidzones
+    environment:
+      OSRM_PROFILE: ${OSRM_PROFILE}
+      PBF_NAME: ${PBF_NAME}
+      OSRM_BASE: ${OSRM_BASE}
+      AVOIDZONES_TOKEN: ${AVOIDZONES_TOKEN}
+    volumes:
+      - ${OSRM_DATA}:/data
+      - ${OSRM_DATA}/profiles:/profiles:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # (optional) for 'docker restart osrm'
+    ports:
+      - "9090:9090"
+
+volumes:
+  tiles-db:
