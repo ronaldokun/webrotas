@@ -6,7 +6,7 @@ services:
       sh -lc "
         set -euo pipefail;
         echo '[pbf_fetcher] Downloading ${OSM_PBF_URL} -> /data/${PBF_NAME}';
-        curl -L --fail --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
+        curl -L --fail --max-time 3600 --connect-timeout 30 -C - --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
         mv /data/${PBF_NAME}.tmp /data/${PBF_NAME};
         ls -lh /data/${PBF_NAME};
         echo '[pbf_fetcher] Done.'
@@ -85,7 +85,7 @@ services:
   avoidzones:
     build:
       context: .
-      dockerfile: ./avoidzones/Dockerfile
+      dockerfile: Dockerfile
     container_name: avoidzones
     depends_on:
       - osrm
@@ -102,7 +102,7 @@ services:
       - ${OSRM_DATA}/profiles:/profiles:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "9090:9090"
+      - "5002:5002"
 
 volumes:
   tiles-db:

@@ -85,7 +85,9 @@ async def verify_token(request: Request):
     """Extract and verify bearer token from Authorization header."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+        raise HTTPException(
+            status_code=401, detail="Missing or invalid Authorization header"
+        )
     token = auth_header[7:]  # Remove "Bearer " prefix
     if token != AVOIDZONES_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
@@ -214,9 +216,7 @@ def process_avoidzones(geojson: dict) -> str:
 
 
 @app.post("/avoidzones/apply", response_model=ApplyResponse)
-async def apply_avoidzones(
-    fc: FeatureCollection, token: str = Depends(verify_token)
-):
+async def apply_avoidzones(fc: FeatureCollection, token: str = Depends(verify_token)):
     """Apply avoid zones polygon(s) and rebuild OSRM."""
     try:
         filename = process_avoidzones(fc.dict())
@@ -262,9 +262,7 @@ async def download_history(filename: str, token: str = Depends(verify_token)):
 
 
 @app.post("/avoidzones/revert")
-async def revert_avoidzones(
-    req: RevertRequest, token: str = Depends(verify_token)
-):
+async def revert_avoidzones(req: RevertRequest, token: str = Depends(verify_token)):
     """Revert to a previous avoid zones configuration."""
     # Prevent directory traversal
     if ".." in req.filename or "/" in req.filename:
@@ -354,7 +352,7 @@ def setup_scheduler():
 scheduler = setup_scheduler()
 
 
-@app.on_event("shutdown")
+@app.lifespan("shutdown")
 async def shutdown_event():
     """Clean up scheduler on shutdown."""
     scheduler.shutdown()
