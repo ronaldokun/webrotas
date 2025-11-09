@@ -46,6 +46,9 @@ COPY --from=builder --chown=nonroot:nonroot /app /app
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Create /data directory and set permissions for nonroot user
+RUN mkdir -p /data && chown -R nonroot:nonroot /data
+
 # Use the non-root user to run our application
 USER nonroot
 

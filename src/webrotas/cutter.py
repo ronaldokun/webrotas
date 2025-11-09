@@ -97,11 +97,11 @@ def apply_penalties(
     writer = osm.io.Writer(str(out_pbf))
     if location_store == "mmap":
         lhandler = osm.NodeLocationsForWays(
-            osm.index.Map("dense_mmap_array"), ignore_errors=True
+            "dense_mmap_array", ignore_errors=True
         )
     else:
         lhandler = osm.NodeLocationsForWays(
-            osm.index.Map("flex_mem"), ignore_errors=True
+            "flex_mem", ignore_errors=True
         )
     penalizer = Penalizer(writer, polys, tree)
     osm.apply(reader, lhandler, penalizer)
