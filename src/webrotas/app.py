@@ -136,74 +136,78 @@ async def verify_token(request: Request):
 # ============================================================================
 
 
-def reprocess_osrm(pbf_name: str):
+def reprocess_osrm(pbf_filename: str):
     """
     Reprocess PBF through OSRM pipeline:
     1. osrm-extract: Extract features from PBF
     2. osrm-partition: Partition extracted data
     3. osrm-customize: Customize routing behavior
-    Then restart the OSRM container.
+    
+    Args:
+        pbf_filename: Just the filename (e.g., 'region_avoidzones.osm.pbf'),
+                     will be looked up in OSRM_DATA_DIR
     """
     try:
+        # Validate filename has no path separators
+        if "/" in pbf_filename or "\\" in pbf_filename:
+            raise ValueError(f"pbf_filename must be a filename only, not a path: {pbf_filename}")
+        
+        pbf_path = OSRM_DATA_DIR / pbf_filename
+        if not pbf_path.exists():
+            raise ValueError(f"PBF file not found: {pbf_path}")
+        
+        pbf_stem = pbf_path.stem
         client = docker.from_env()
-        pbf_stem = Path(pbf_name).stem
         osrm_image = "ghcr.io/project-osrm/osrm-backend:6.0.0"
         volume_bind = {str(OSRM_DATA_DIR): {"bind": "/data", "mode": "rw"}}
-
+        
+        # Helper function to run container and check exit code
+        def run_osrm_command(command_name, cmd):
+            logger.info(f"Running {command_name}...")
+            container = None
+            try:
+                container = client.containers.run(
+                    osrm_image,
+                    cmd,
+                    volumes=volume_bind,
+                    rm=False,  # Don't remove yet, so we can check exit code
+                    stdout=True,
+                    stderr=True,
+                    detach=False,
+                )
+                # Get exit code
+                exit_code = container.wait()
+                if exit_code != 0:
+                    logs = container.logs(stdout=True, stderr=True).decode(errors="replace")
+                    raise RuntimeError(
+                        f"{command_name} failed with exit code {exit_code}. Output: {logs}"
+                    )
+                logger.info(f"{command_name} completed successfully")
+            finally:
+                if container:
+                    try:
+                        container.remove()
+                    except Exception as e:
+                        logger.warning(f"Failed to remove container: {e}")
+        
         # Step 1: osrm-extract
-        logger.info(f"Running osrm-extract on {pbf_name}...")
-        try:
-            result = client.containers.run(
-                osrm_image,
-                f"osrm-extract -p {OSRM_PROFILE} /data/{pbf_name}",
-                volumes=volume_bind,
-                rm=True,
-                stdout=True,
-                stderr=True,
-            )
-            logger.info(
-                f"osrm-extract completed: {result.decode() if isinstance(result, bytes) else result}"
-            )
-        except Exception as e:
-            logger.error(f"osrm-extract failed: {e}")
-            raise
-
+        run_osrm_command(
+            "osrm-extract",
+            f"osrm-extract -p {OSRM_PROFILE} /data/{pbf_filename}"
+        )
+        
         # Step 2: osrm-partition
-        logger.info(f"Running osrm-partition on {pbf_stem}.osrm...")
-        try:
-            result = client.containers.run(
-                osrm_image,
-                f"osrm-partition /data/{pbf_stem}.osrm",
-                volumes=volume_bind,
-                rm=True,
-                stdout=True,
-                stderr=True,
-            )
-            logger.info(
-                f"osrm-partition completed: {result.decode() if isinstance(result, bytes) else result}"
-            )
-        except Exception as e:
-            logger.error(f"osrm-partition failed: {e}")
-            raise
-
+        run_osrm_command(
+            "osrm-partition",
+            f"osrm-partition /data/{pbf_stem}.osrm"
+        )
+        
         # Step 3: osrm-customize
-        logger.info(f"Running osrm-customize on {pbf_stem}.osrm...")
-        try:
-            result = client.containers.run(
-                osrm_image,
-                f"osrm-customize /data/{pbf_stem}.osrm",
-                volumes=volume_bind,
-                rm=True,
-                stdout=True,
-                stderr=True,
-            )
-            logger.info(
-                f"osrm-customize completed: {result.decode() if isinstance(result, bytes) else result}"
-            )
-        except Exception as e:
-            logger.error(f"osrm-customize failed: {e}")
-            raise
-
+        run_osrm_command(
+            "osrm-customize",
+            f"osrm-customize /data/{pbf_stem}.osrm"
+        )
+        
         logger.info("All OSRM preprocessing steps completed successfully")
     except Exception as e:
         logger.error(f"Failed to reprocess OSRM: {e}")
@@ -246,6 +250,15 @@ def download_pbf():
             text=True,
             timeout=3600,  # 1 hour timeout
         )
+        # Defensive checks: verify download succeeded
+        if not pbf_tmp.exists():
+            raise ValueError(f"PBF download failed: temporary file {pbf_tmp} was not created")
+        
+        file_size = pbf_tmp.stat().st_size
+        if file_size == 0:
+            pbf_tmp.unlink()
+            raise ValueError("PBF download resulted in empty file")
+        
         pbf_tmp.rename(pbf_path)
         size_mb = pbf_path.stat().st_size / (1024 * 1024)
         logger.info(f"PBF downloaded successfully ({size_mb:.1f} MB)")
@@ -306,9 +319,34 @@ def process_avoidzones(geojson: dict) -> str:
         logger.error(f"Failed to apply penalties: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to apply penalties: {e}")
 
+    # Verify modified PBF was created and has content
+    if not modified_pbf.exists():
+        raise HTTPException(status_code=500, detail=f"Modified PBF file was not created: {modified_pbf}")
+    
+    file_size = modified_pbf.stat().st_size
+    if file_size == 0:
+        modified_pbf.unlink()
+        raise HTTPException(status_code=500, detail="Modified PBF file is empty after applying penalties")
+    
+    logger.info(f"Modified PBF created successfully ({file_size / 1024 / 1024:.1f} MB)")
+
     # Reprocess OSRM with the modified PBF
     reprocess_osrm(modified_pbf.name)
-
+    
+    # Wait for files to sync to disk before restarting container
+    import time
+    time.sleep(2)
+    
+    # Verify partition files were created by osrm-customize
+    pbf_stem = modified_pbf.stem
+    expected_files = [
+        OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
+        OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
+    ]
+    for f in expected_files:
+        if not f.exists():
+            raise HTTPException(status_code=500, detail=f"Expected partition file missing after preprocessing: {f}")
+    
     # Restart OSRM to load the reprocessed data
     restart_osrm()
 
