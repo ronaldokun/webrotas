@@ -1,14 +1,19 @@
 # cutter.py
 import json
+import os
 from pathlib import Path
 from typing import List
 import osmium as osm
 from shapely.geometry import shape
 from shapely.strtree import STRtree
 from shapely import wkb as shapely_wkb
+import logging
 
-INSIDE_FACTOR = 0.02
-TOUCH_FACTOR = 0.10
+# Configurable penalty factors (can be overridden via environment variables)
+INSIDE_FACTOR = float(os.getenv("AVOIDZONE_INSIDE_FACTOR", "0.02"))
+TOUCH_FACTOR = float(os.getenv("AVOIDZONE_TOUCH_FACTOR", "0.10"))
+
+logger = logging.getLogger(__name__)
 
 
 def _load_polys(geojson_path: Path):
@@ -31,6 +36,8 @@ class Penalizer(osm.SimpleHandler):
         self.polys = polys
         self.tree = tree
         self.wkbf = osm.geom.WKBFactory()
+        self._way_count = 0
+        self._penalized_count = 0
 
     def node(self, n):
         self.w.add_node(n)
@@ -39,6 +46,10 @@ class Penalizer(osm.SimpleHandler):
         self.w.add_relation(r)
 
     def way(self, w):
+        self._way_count += 1
+        if self._way_count % 100000 == 0:
+            logger.info("Processed %d ways (penalized=%d)", self._way_count, self._penalized_count)
+
         kv = dict(w.tags)
         if "highway" not in kv and kv.get("route") != "ferry":
             self.w.add_way(w)
@@ -67,6 +78,7 @@ class Penalizer(osm.SimpleHandler):
             self.w.add_way(w)
             return
 
+        self._penalized_count += 1
         mw = osm.osm.mutable.Way(w)
         tags = {t.k: t.v for t in w.tags}
         tags["avoid_zone"] = "yes"
@@ -78,7 +90,9 @@ class Penalizer(osm.SimpleHandler):
 def apply_penalties(
     in_pbf: Path, polygons_geojson: Path, out_pbf: Path, location_store: str = "mmap"
 ):
+    logger.info("Loading polygons from %s", polygons_geojson)
     polys, tree = _load_polys(polygons_geojson)
+    logger.info("Starting PBF processing: input=%s output=%s", in_pbf, out_pbf)
     reader = osm.io.Reader(str(in_pbf))
     writer = osm.io.Writer(str(out_pbf))
     if location_store == "mmap":
@@ -93,3 +107,4 @@ def apply_penalties(
     osm.apply(reader, lhandler, penalizer)
     writer.close()
     reader.close()
+    logger.info("Finished PBF processing. Penalized ways: %d", penalizer._penalized_count)

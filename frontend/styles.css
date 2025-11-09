@@ -50,3 +50,39 @@ body,
 #history button {
     margin-left: 6px;
 }
+
+/* Force draw toolbar visibility and move to top-right */
+.leaflet-draw-control {
+    display: block !important;
+    visibility: visible !important;
+    z-index: 1000 !important;
+    position: absolute !important;
+    top: 10px !important;
+    right: 10px !important;
+    left: auto !important;
+    bottom: auto !important;
+}
+
+.leaflet-draw-section {
+    display: block !important;
+    visibility: visible !important;
+}
+
+.leaflet-draw-toolbar {
+    display: flex !important;
+    flex-direction: column !important;
+    visibility: visible !important;
+    background: white !important;
+    border: 1px solid #ccc !important;
+    border-radius: 4px !important;
+    gap: 0 !important;
+}
+
+.leaflet-draw-toolbar a {
+    display: block !important;
+    visibility: visible !important;
+    width: 30px !important;
+    height: 30px !important;
+    background-size: 300px 30px !important;
+    background-repeat: no-repeat !important;
+}

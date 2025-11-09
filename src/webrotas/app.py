@@ -4,10 +4,12 @@ import subprocess
 import docker
 from pathlib import Path
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any, Literal
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,7 +21,7 @@ from .cutter import apply_penalties
 # ============================================================================
 
 OSRM_PROFILE = os.getenv("OSRM_PROFILE", "/profiles/car_avoid.lua")
-PBF_NAME = os.getenv("PBF_NAME", "region-latest.osm.pbf")
+PBF_NAME = os.getenv("PBF_NAME", "region.osm.pbf")
 OSRM_BASE = os.getenv("OSRM_BASE", "region")
 AVOIDZONES_TOKEN = os.getenv("AVOIDZONES_TOKEN", "default-token")
 OSRM_DATA_DIR = Path(os.getenv("OSRM_DATA", "/data"))
@@ -27,7 +29,6 @@ OSM_PBF_URL = os.getenv("OSM_PBF_URL", "")
 
 # History and state directories
 HISTORY_DIR = OSRM_DATA_DIR / "avoidzones_history"
-STATE_FILE = OSRM_DATA_DIR / "current_avoidzones.geojson"
 LATEST_POLYGONS = OSRM_DATA_DIR / "latest_avoidzones.geojson"
 
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,7 +41,19 @@ logger = logging.getLogger(__name__)
 # FastAPI Setup
 # ============================================================================
 
-app = FastAPI(title="Avoid Zones API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan: startup and shutdown events."""
+    # Startup
+    scheduler = setup_scheduler()
+    yield
+    # Shutdown
+    scheduler.shutdown()
+    logger.info("Scheduler shut down")
+
+
+app = FastAPI(title="Avoid Zones API", lifespan=lifespan)
 
 # Enable CORS
 app.add_middleware(
@@ -56,9 +69,33 @@ app.add_middleware(
 # ============================================================================
 
 
+class Geometry(BaseModel):
+    """GeoJSON Geometry model."""
+
+    type: Literal["Polygon", "MultiPolygon"]
+    coordinates: List[Any]
+
+
+class Feature(BaseModel):
+    """GeoJSON Feature model."""
+
+    type: Literal["Feature"]
+    geometry: Geometry
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+
 class FeatureCollection(BaseModel):
-    type: str
-    features: list
+    """GeoJSON FeatureCollection model with validation."""
+
+    type: Literal["FeatureCollection"]
+    features: List[Feature]
+
+    @field_validator("features")
+    @classmethod
+    def validate_features(cls, v):
+        if not v:
+            raise ValueError("FeatureCollection must contain at least one feature")
+        return v
 
 
 class ApplyResponse(BaseModel):
@@ -105,20 +142,11 @@ def restart_osrm():
         client = docker.from_env()
         container = client.containers.get("osrm")
         logger.info("Restarting OSRM container...")
-        container.restart()
+        container.restart(timeout=30)
         logger.info("OSRM container restarted.")
     except Exception as e:
         logger.error(f"Failed to restart OSRM: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to restart OSRM: {e}")
-
-
-def get_docker_client():
-    """Get a Docker client, supporting socket mounting."""
-    try:
-        return docker.from_env()
-    except Exception as e:
-        logger.error(f"Failed to connect to Docker: {e}")
-        return None
 
 
 # ============================================================================
@@ -346,14 +374,3 @@ def setup_scheduler():
     )
 
     return scheduler
-
-
-# Start scheduler on app startup
-scheduler = setup_scheduler()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up scheduler on shutdown."""
-    scheduler.shutdown()
-    logger.info("Scheduler shut down")

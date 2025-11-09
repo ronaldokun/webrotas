@@ -6,7 +6,7 @@
     <title>OSRM + Tiles + AvoidZones (with History)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="./leaflet.draw.css" />
     <link rel="stylesheet" href="./styles.css" />
 </head>
 
@@ -42,22 +42,36 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <script src="./leaflet.draw.js"></script>
     <script>
         const TILE_URL = 'http://localhost:8090/tile/{z}/{x}/{y}.png';
         const OSRM_URL = 'http://localhost:5000';
         const API_URL = 'http://localhost:9090';
 
+        console.log('Leaflet version:', L.version);
+        console.log('L.Draw available?', typeof L.Draw !== 'undefined');
+        console.log('L.Control.Draw available?', typeof L.Control.Draw !== 'undefined');
+
         const map = L.map('map').setView([-23.55, -46.66], 11);
         L.tileLayer(TILE_URL, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
         const drawnItems = new L.FeatureGroup(); map.addLayer(drawnItems);
-        const drawControl = new L.Control.Draw({
-            draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false },
-            edit: { featureGroup: drawnItems }
-        });
-        map.addControl(drawControl);
-        map.on(L.Draw.Event.CREATED, e => drawnItems.addLayer(e.layer));
+        
+        if (typeof L.Control.Draw !== 'undefined') {
+            console.log('Creating L.Control.Draw...');
+            const drawControl = new L.Control.Draw({
+                draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false },
+                edit: { featureGroup: drawnItems }
+            });
+            map.addControl(drawControl);
+            console.log('Draw control added to map');
+        } else {
+            console.error('L.Control.Draw is not available! Leaflet-Draw may not be loaded.');
+        }
+        
+        if (typeof L.Draw !== 'undefined') {
+            map.on(L.Draw.Event.CREATED, e => drawnItems.addLayer(e.layer));
+        }
 
         let routeLayer = L.geoJSON(null, { style: { weight: 5 } }).addTo(map);
 

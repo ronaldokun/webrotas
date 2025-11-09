@@ -25,18 +25,7 @@ services:
     volumes:
       - ${OSRM_DATA}:/data
       - ${OSRM_DATA}/profiles:/profiles:ro
-    command: >
-      sh -lc "
-        set -euo pipefail;
-        echo '[osrm] Extract';
-        osrm-extract -p ${OSRM_PROFILE} /data/${PBF_NAME};
-        echo '[osrm] Partition';
-        osrm-partition /data/${OSRM_BASE}.osrm;
-        echo '[osrm] Customize';
-        osrm-customize /data/${OSRM_BASE}.osrm;
-        echo '[osrm] Serving on :5000';
-        osrm-routed --max-matching-size 1000 --max-table-size 1000 --max-viaroute-size 1000 --algorithm mld /data/${OSRM_BASE}.osrm
-      "
+    command: osrm-routed --max-matching-size 1000 --max-table-size 1000 --max-viaroute-size 1000 --algorithm mld /data/${OSRM_BASE}.osrm
     env_file: .env
     ports:
       - "5000:5000"
@@ -44,28 +33,39 @@ services:
   tile_import:
     image: overv/openstreetmap-tile-server:latest
     container_name: tile_import
+    user: "root"
     # depends_on:
     #   pbf_fetcher:
     #     condition: service_completed_successfully
     volumes:
       - ${OSRM_DATA}:/data
       - tiles-db:/var/lib/postgresql/15/main
+      - tiles-cache:/var/cache/renderd
+      - ./tile-import-wrapper.sh:/tile-import-wrapper.sh:ro
     environment:
       UPDATES: "disabled"
-    command: "import"
+      THREADS: "4"
+      # Memory for osm2pgsql (4GB cache, slim mode, drop intermediate tables)
+      OSM2PGSQL_EXTRA_ARGS: "-C 4096 --slim --drop"
+    env_file: .env
+    entrypoint: /bin/bash /tile-import-wrapper.sh
     restart: "no"
 
   tile_server:
     image: overv/openstreetmap-tile-server:latest
     container_name: osmtiles
+    user: "root"
     depends_on:
       tile_import:
         condition: service_completed_successfully
     volumes:
-      - ${OSRM_DATA}:/data:ro
+      - ${OSRM_DATA}:/data
       - tiles-db:/var/lib/postgresql/15/main
+      - tiles-cache:/var/cache/renderd
     environment:
       UPDATES: "disabled"
+      THREADS: "4"
+    env_file: .env
     command: "run"
     ports:
       - "8090:80"
@@ -78,7 +78,7 @@ services:
       - tile_server
       - avoidzones
     volumes:
-      - ${OSRM_DATA}/frontend:/usr/share/nginx/html:ro
+      - ./frontend:/usr/share/nginx/html
     ports:
       - "8081:80"
 
@@ -96,7 +96,8 @@ services:
       AVOIDZONES_TOKEN: ${AVOIDZONES_TOKEN}
       OSM_PBF_URL: ${OSM_PBF_URL}
       REFRESH_CRON_HOUR: ${REFRESH_CRON_HOUR:-2}
-      OSRM_DATA: ${OSRM_DATA}
+      AVOIDZONE_INSIDE_FACTOR: ${AVOIDZONE_INSIDE_FACTOR:-0.02}
+      AVOIDZONE_TOUCH_FACTOR: ${AVOIDZONE_TOUCH_FACTOR:-0.10}
     volumes:
       - ${OSRM_DATA}:/data
       - ${OSRM_DATA}/profiles:/profiles:ro
@@ -112,3 +113,4 @@ services:
 
 volumes:
   tiles-db:
+  tiles-cache:
