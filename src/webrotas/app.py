@@ -136,6 +136,80 @@ async def verify_token(request: Request):
 # ============================================================================
 
 
+def reprocess_osrm(pbf_name: str):
+    """
+    Reprocess PBF through OSRM pipeline:
+    1. osrm-extract: Extract features from PBF
+    2. osrm-partition: Partition extracted data
+    3. osrm-customize: Customize routing behavior
+    Then restart the OSRM container.
+    """
+    try:
+        client = docker.from_env()
+        pbf_stem = Path(pbf_name).stem
+        osrm_image = "ghcr.io/project-osrm/osrm-backend:6.0.0"
+        volume_bind = {str(OSRM_DATA_DIR): {"bind": "/data", "mode": "rw"}}
+
+        # Step 1: osrm-extract
+        logger.info(f"Running osrm-extract on {pbf_name}...")
+        try:
+            result = client.containers.run(
+                osrm_image,
+                f"osrm-extract -p {OSRM_PROFILE} /data/{pbf_name}",
+                volumes=volume_bind,
+                rm=True,
+                stdout=True,
+                stderr=True,
+            )
+            logger.info(
+                f"osrm-extract completed: {result.decode() if isinstance(result, bytes) else result}"
+            )
+        except Exception as e:
+            logger.error(f"osrm-extract failed: {e}")
+            raise
+
+        # Step 2: osrm-partition
+        logger.info(f"Running osrm-partition on {pbf_stem}.osrm...")
+        try:
+            result = client.containers.run(
+                osrm_image,
+                f"osrm-partition /data/{pbf_stem}.osrm",
+                volumes=volume_bind,
+                rm=True,
+                stdout=True,
+                stderr=True,
+            )
+            logger.info(
+                f"osrm-partition completed: {result.decode() if isinstance(result, bytes) else result}"
+            )
+        except Exception as e:
+            logger.error(f"osrm-partition failed: {e}")
+            raise
+
+        # Step 3: osrm-customize
+        logger.info(f"Running osrm-customize on {pbf_stem}.osrm...")
+        try:
+            result = client.containers.run(
+                osrm_image,
+                f"osrm-customize /data/{pbf_stem}.osrm",
+                volumes=volume_bind,
+                rm=True,
+                stdout=True,
+                stderr=True,
+            )
+            logger.info(
+                f"osrm-customize completed: {result.decode() if isinstance(result, bytes) else result}"
+            )
+        except Exception as e:
+            logger.error(f"osrm-customize failed: {e}")
+            raise
+
+        logger.info("All OSRM preprocessing steps completed successfully")
+    except Exception as e:
+        logger.error(f"Failed to reprocess OSRM: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to reprocess OSRM: {e}")
+
+
 def restart_osrm():
     """Restart the OSRM container to reload the modified PBF."""
     try:
@@ -219,7 +293,7 @@ def process_avoidzones(geojson: dict) -> str:
 
     # Apply penalties
     pbf_path = OSRM_DATA_DIR / PBF_NAME
-    modified_pbf = OSRM_DATA_DIR / f"{OSRM_BASE}.osrm.pbf"
+    modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
 
     if not pbf_path.exists():
         raise ValueError(f"PBF file not found: {pbf_path}")
@@ -232,7 +306,10 @@ def process_avoidzones(geojson: dict) -> str:
         logger.error(f"Failed to apply penalties: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to apply penalties: {e}")
 
-    # Restart OSRM
+    # Reprocess OSRM with the modified PBF
+    reprocess_osrm(modified_pbf.name)
+
+    # Restart OSRM to load the reprocessed data
     restart_osrm()
 
     return filename
