@@ -104,6 +104,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          memory: ${AVOIDZONES_MEMORY_LIMIT:-16g}
+          cpus: ${AVOIDZONES_CPUS_LIMIT:-4.0}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 30s

@@ -27,6 +27,10 @@ AVOIDZONES_TOKEN = os.getenv("AVOIDZONES_TOKEN", "default-token")
 OSRM_DATA_DIR = Path(os.getenv("OSRM_DATA", "/data"))
 OSM_PBF_URL = os.getenv("OSM_PBF_URL", "")
 
+# Docker resource limits for OSRM preprocessing
+DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "16g")
+DOCKER_CPUS_LIMIT = float(os.getenv("DOCKER_CPUS_LIMIT", "4.0"))
+
 # History and state directories
 HISTORY_DIR = OSRM_DATA_DIR / "avoidzones_history"
 LATEST_POLYGONS = OSRM_DATA_DIR / "latest_avoidzones.geojson"
@@ -142,7 +146,7 @@ def reprocess_osrm(pbf_filename: str):
     1. osrm-extract: Extract features from PBF
     2. osrm-partition: Partition extracted data
     3. osrm-customize: Customize routing behavior
-    
+
     Args:
         pbf_filename: Just the filename (e.g., 'region_avoidzones.osm.pbf'),
                      will be looked up in OSRM_DATA_DIR
@@ -150,17 +154,19 @@ def reprocess_osrm(pbf_filename: str):
     try:
         # Validate filename has no path separators
         if "/" in pbf_filename or "\\" in pbf_filename:
-            raise ValueError(f"pbf_filename must be a filename only, not a path: {pbf_filename}")
-        
+            raise ValueError(
+                f"pbf_filename must be a filename only, not a path: {pbf_filename}"
+            )
+
         pbf_path = OSRM_DATA_DIR / pbf_filename
         if not pbf_path.exists():
             raise ValueError(f"PBF file not found: {pbf_path}")
-        
+
         pbf_stem = pbf_path.stem
         client = docker.from_env()
         osrm_image = "ghcr.io/project-osrm/osrm-backend:6.0.0"
         volume_bind = {str(OSRM_DATA_DIR): {"bind": "/data", "mode": "rw"}}
-        
+
         # Helper function to run container and check exit code
         def run_osrm_command(command_name, cmd):
             logger.info(f"Running {command_name}...")
@@ -174,11 +180,16 @@ def reprocess_osrm(pbf_filename: str):
                     stdout=True,
                     stderr=True,
                     detach=False,
+                    mem_limit=DOCKER_MEMORY_LIMIT,
+                    memswap_limit=DOCKER_MEMORY_LIMIT,
+                    cpus=DOCKER_CPUS_LIMIT,
                 )
                 # Get exit code
                 exit_code = container.wait()
                 if exit_code != 0:
-                    logs = container.logs(stdout=True, stderr=True).decode(errors="replace")
+                    logs = container.logs(stdout=True, stderr=True).decode(
+                        errors="replace"
+                    )
                     raise RuntimeError(
                         f"{command_name} failed with exit code {exit_code}. Output: {logs}"
                     )
@@ -189,25 +200,18 @@ def reprocess_osrm(pbf_filename: str):
                         container.remove()
                     except Exception as e:
                         logger.warning(f"Failed to remove container: {e}")
-        
+
         # Step 1: osrm-extract
         run_osrm_command(
-            "osrm-extract",
-            f"osrm-extract -p {OSRM_PROFILE} /data/{pbf_filename}"
+            "osrm-extract", f"osrm-extract -p {OSRM_PROFILE} /data/{pbf_filename}"
         )
-        
+
         # Step 2: osrm-partition
-        run_osrm_command(
-            "osrm-partition",
-            f"osrm-partition /data/{pbf_stem}.osrm"
-        )
-        
+        run_osrm_command("osrm-partition", f"osrm-partition /data/{pbf_stem}.osrm")
+
         # Step 3: osrm-customize
-        run_osrm_command(
-            "osrm-customize",
-            f"osrm-customize /data/{pbf_stem}.osrm"
-        )
-        
+        run_osrm_command("osrm-customize", f"osrm-customize /data/{pbf_stem}.osrm")
+
         logger.info("All OSRM preprocessing steps completed successfully")
     except Exception as e:
         logger.error(f"Failed to reprocess OSRM: {e}")
@@ -252,13 +256,15 @@ def download_pbf():
         )
         # Defensive checks: verify download succeeded
         if not pbf_tmp.exists():
-            raise ValueError(f"PBF download failed: temporary file {pbf_tmp} was not created")
-        
+            raise ValueError(
+                f"PBF download failed: temporary file {pbf_tmp} was not created"
+            )
+
         file_size = pbf_tmp.stat().st_size
         if file_size == 0:
             pbf_tmp.unlink()
             raise ValueError("PBF download resulted in empty file")
-        
+
         pbf_tmp.rename(pbf_path)
         size_mb = pbf_path.stat().st_size / (1024 * 1024)
         logger.info(f"PBF downloaded successfully ({size_mb:.1f} MB)")
@@ -321,22 +327,28 @@ def process_avoidzones(geojson: dict) -> str:
 
     # Verify modified PBF was created and has content
     if not modified_pbf.exists():
-        raise HTTPException(status_code=500, detail=f"Modified PBF file was not created: {modified_pbf}")
-    
+        raise HTTPException(
+            status_code=500, detail=f"Modified PBF file was not created: {modified_pbf}"
+        )
+
     file_size = modified_pbf.stat().st_size
     if file_size == 0:
         modified_pbf.unlink()
-        raise HTTPException(status_code=500, detail="Modified PBF file is empty after applying penalties")
-    
+        raise HTTPException(
+            status_code=500,
+            detail="Modified PBF file is empty after applying penalties",
+        )
+
     logger.info(f"Modified PBF created successfully ({file_size / 1024 / 1024:.1f} MB)")
 
     # Reprocess OSRM with the modified PBF
     reprocess_osrm(modified_pbf.name)
-    
+
     # Wait for files to sync to disk before restarting container
     import time
+
     time.sleep(2)
-    
+
     # Verify partition files were created by osrm-customize
     pbf_stem = modified_pbf.stem
     expected_files = [
@@ -345,8 +357,11 @@ def process_avoidzones(geojson: dict) -> str:
     ]
     for f in expected_files:
         if not f.exists():
-            raise HTTPException(status_code=500, detail=f"Expected partition file missing after preprocessing: {f}")
-    
+            raise HTTPException(
+                status_code=500,
+                detail=f"Expected partition file missing after preprocessing: {f}",
+            )
+
     # Restart OSRM to load the reprocessed data
     restart_osrm()
 
