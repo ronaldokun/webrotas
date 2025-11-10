@@ -226,7 +226,7 @@ def restart_osrm():
         client = docker.from_env()
         container = client.containers.get("osrm")
         logger.info("Restarting OSRM container...")
-        container.restart(timeout=30)
+        container.restart(timeout=300)
         logger.info("OSRM container restarted.")
     except Exception as e:
         logger.error(f"Failed to restart OSRM: {e}")
@@ -295,6 +295,7 @@ def _apply_pbf_penalties_background():
     """
     try:
         from .cutter import apply_penalties
+
         pbf_path = OSRM_DATA_DIR / PBF_NAME
         modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
 
@@ -303,7 +304,9 @@ def _apply_pbf_penalties_background():
             return
 
         logger.info("[BG] Applying penalties to PBF...")
-        apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf, location_store="flex_mem")
+        apply_penalties(
+            pbf_path, LATEST_POLYGONS, modified_pbf, location_store="flex_mem"
+        )
         logger.info("[BG] Penalties applied successfully")
 
         size_mb = modified_pbf.stat().st_size / 1024 / 1024
@@ -312,6 +315,7 @@ def _apply_pbf_penalties_background():
         reprocess_osrm(modified_pbf.name)
 
         import time
+
         time.sleep(2)
 
         pbf_stem = modified_pbf.stem
@@ -337,7 +341,7 @@ def process_avoidzones(geojson: dict) -> str:
     1. Save the geojson to history
     2. Convert polygons to Lua format
     3. Start PBF reprocessing in background thread (non-blocking)
-    
+
     Returns the filename of the saved history entry immediately,
     while PBF reprocessing happens in the background.
     """
@@ -478,13 +482,13 @@ def auto_refresh_pbf():
     if not download_pbf():
         logger.error("[CRON] Failed to download PBF")
         return
-    
+
     logger.info("[CRON] PBF downloaded successfully")
-    
+
     # NOTE: With Lua-only approach, we no longer need to reapply polygons
     # The Lua profile will use whatever zones are defined in avoid_zones_data.lua
     # This makes the cron task much faster.
-    # 
+    #
     # COMMENTED OUT:
     # if LATEST_POLYGONS.exists():
     #     try:

@@ -66,8 +66,8 @@ class Penalizer(osm.SimpleHandler):
             return
 
         line = shapely_wkb.loads(wkb, hex=False)
-        candidates = self.tree.query(line)
-        if not candidates:
+        candidate_indices = self.tree.query(line)
+        if len(candidate_indices) == 0:
             self.w.add_way(w)
             return
 
@@ -78,7 +78,8 @@ class Penalizer(osm.SimpleHandler):
         is_touching = False
         penalty_reason = None
 
-        for p in candidates:
+        for idx in candidate_indices:
+            p = self.polys[idx]
             if line.within(p):
                 # Way is completely inside polygon - most restrictive penalty
                 is_inside = True
