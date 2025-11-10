@@ -337,59 +337,41 @@ def process_avoidzones(geojson: dict) -> str:
         logger.error(f"Failed to convert polygons to Lua: {e}")
         logger.warning("Continuing despite Lua conversion error")
 
-    # ===== IMPORTANT: PBF REPROCESSING IS DISABLED =====
-    # The following code is commented out per specification.
-    # Uncomment to enable full PBF reprocessing (5-30 minutes, very resource intensive).
-    #
-    # REASON FOR DISABLING:
-    # - PBF reprocessing requires: osrm-extract → osrm-partition → osrm-customize
-    # - Each step can take 5+ minutes even on high-end hardware
-    # - Uses 8GB+ RAM during processing
-    # - Not feasible for on-demand single-polygon requests with multiple clients
-    #
-    # COMMENTED OUT CODE:
-    # try:
-    #     pbf_path = OSRM_DATA_DIR / PBF_NAME
-    #     modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
-    #
-    #     if not pbf_path.exists():
-    #         raise ValueError(f"PBF file not found: {pbf_path}")
-    #
-    #     logger.info("Applying penalties to PBF...")
-    #     apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf)
-    #     logger.info("Penalties applied successfully")
-    #
-    #     logger.info(f"Modified PBF created ({modified_pbf.stat().st_size / 1024 / 1024:.1f} MB)")
-    #     logger.info("Reprocessing OSRM...")
-    #     reprocess_osrm(modified_pbf.name)
-    #
-    #     import time
-    #     time.sleep(2)
-    #
-    #     pbf_stem = modified_pbf.stem
-    #     expected_files = [
-    #         OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
-    #         OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
-    #     ]
-    #     for f in expected_files:
-    #         if not f.exists():
-    #             raise HTTPException(
-    #                 status_code=500,
-    #                 detail=f"Expected partition file missing: {f}",
-    #             )
-    #
-    #     restart_osrm()
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail=str(e))
-    #
-    # ====== END COMMENTED OUT CODE ======
-    
-    # Minimal restart for profile reload (if any profile changes)
+    # Apply PBF reprocessing with penalty tags
     try:
+        from .cutter import apply_penalties
+        pbf_path = OSRM_DATA_DIR / PBF_NAME
+        modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
+
+        if not pbf_path.exists():
+            raise ValueError(f"PBF file not found: {pbf_path}")
+
+        logger.info("Applying penalties to PBF...")
+        apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf)
+        logger.info("Penalties applied successfully")
+
+        logger.info(f"Modified PBF created ({modified_pbf.stat().st_size / 1024 / 1024:.1f} MB)")
+        logger.info("Reprocessing OSRM...")
+        reprocess_osrm(modified_pbf.name)
+
+        import time
+        time.sleep(2)
+
+        pbf_stem = modified_pbf.stem
+        expected_files = [
+            OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
+            OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
+        ]
+        for f in expected_files:
+            if not f.exists():
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Expected partition file missing: {f}",
+                )
+
         restart_osrm()
     except Exception as e:
-        logger.warning(f"Failed to restart OSRM: {e}")
-        # Don't fail the request just because restart failed
+        raise HTTPException(status_code=500, detail=str(e))
 
     return filename
 
