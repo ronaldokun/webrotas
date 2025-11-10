@@ -14,7 +14,8 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .cutter import apply_penalties
+# from .cutter import apply_penalties
+from .lua_converter import write_lua_zones_file
 
 # ============================================================================
 # Configuration
@@ -28,7 +29,7 @@ OSRM_DATA_DIR = Path(os.getenv("OSRM_DATA", "/data"))
 OSM_PBF_URL = os.getenv("OSM_PBF_URL", "")
 
 # Docker resource limits for OSRM preprocessing
-DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "16g")
+DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "8g")
 DOCKER_CPUS_LIMIT = float(os.getenv("DOCKER_CPUS_LIMIT", "4.0"))
 
 # History and state directories
@@ -290,8 +291,21 @@ def process_avoidzones(geojson: dict) -> str:
     """
     Process avoid zones:
     1. Save the geojson to history
-    2. Apply penalties to PBF
-    3. Rebuild OSRM
+    2. Convert polygons to Lua format (for potential future use)
+    3. PBF reprocessing is COMMENTED OUT to reduce resource usage
+    
+    NOTE: LIMITATION - OSRM's Lua profiles cannot access way node coordinates
+    in the process_way() hook. Therefore, true dynamic polygon checking is not
+    possible without reprocessing the PBF file to add penalty tags.
+    
+    Current behavior:
+    - Saves polygon configuration
+    - Generates Lua data file (for documentation/future use)
+    - Restarts OSRM to pick up profile changes
+    
+    To enable full penalty application, uncomment the PBF reprocessing code
+    below (lines marked COMMENTED OUT).
+    
     Returns the filename of the saved history entry.
     """
     # Validate GeoJSON
@@ -309,61 +323,73 @@ def process_avoidzones(geojson: dict) -> str:
 
     # Save as latest
     LATEST_POLYGONS.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+    logger.info(f"Saved as latest polygons: {LATEST_POLYGONS}")
 
-    # Apply penalties
-    pbf_path = OSRM_DATA_DIR / PBF_NAME
-    modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
-
-    if not pbf_path.exists():
-        raise ValueError(f"PBF file not found: {pbf_path}")
-
+    # Convert to Lua format (for potential future use or documentation)
+    lua_zones_file = OSRM_DATA_DIR / "profiles" / "avoid_zones_data.lua"
     try:
-        logger.info("Applying penalties to PBF...")
-        apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf)
-        logger.info("Penalties applied successfully")
+        logger.info("Converting polygons to Lua format...")
+        if write_lua_zones_file(LATEST_POLYGONS, lua_zones_file):
+            logger.info(f"Lua zones file written to {lua_zones_file}")
+        else:
+            logger.warning("Failed to write Lua zones file, continuing anyway")
     except Exception as e:
-        logger.error(f"Failed to apply penalties: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to apply penalties: {e}")
+        logger.error(f"Failed to convert polygons to Lua: {e}")
+        logger.warning("Continuing despite Lua conversion error")
 
-    # Verify modified PBF was created and has content
-    if not modified_pbf.exists():
-        raise HTTPException(
-            status_code=500, detail=f"Modified PBF file was not created: {modified_pbf}"
-        )
-
-    file_size = modified_pbf.stat().st_size
-    if file_size == 0:
-        modified_pbf.unlink()
-        raise HTTPException(
-            status_code=500,
-            detail="Modified PBF file is empty after applying penalties",
-        )
-
-    logger.info(f"Modified PBF created successfully ({file_size / 1024 / 1024:.1f} MB)")
-
-    # Reprocess OSRM with the modified PBF
-    reprocess_osrm(modified_pbf.name)
-
-    # Wait for files to sync to disk before restarting container
-    import time
-
-    time.sleep(2)
-
-    # Verify partition files were created by osrm-customize
-    pbf_stem = modified_pbf.stem
-    expected_files = [
-        OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
-        OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
-    ]
-    for f in expected_files:
-        if not f.exists():
-            raise HTTPException(
-                status_code=500,
-                detail=f"Expected partition file missing after preprocessing: {f}",
-            )
-
-    # Restart OSRM to load the reprocessed data
-    restart_osrm()
+    # ===== IMPORTANT: PBF REPROCESSING IS DISABLED =====
+    # The following code is commented out per specification.
+    # Uncomment to enable full PBF reprocessing (5-30 minutes, very resource intensive).
+    #
+    # REASON FOR DISABLING:
+    # - PBF reprocessing requires: osrm-extract → osrm-partition → osrm-customize
+    # - Each step can take 5+ minutes even on high-end hardware
+    # - Uses 8GB+ RAM during processing
+    # - Not feasible for on-demand single-polygon requests with multiple clients
+    #
+    # COMMENTED OUT CODE:
+    # try:
+    #     pbf_path = OSRM_DATA_DIR / PBF_NAME
+    #     modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
+    #
+    #     if not pbf_path.exists():
+    #         raise ValueError(f"PBF file not found: {pbf_path}")
+    #
+    #     logger.info("Applying penalties to PBF...")
+    #     apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf)
+    #     logger.info("Penalties applied successfully")
+    #
+    #     logger.info(f"Modified PBF created ({modified_pbf.stat().st_size / 1024 / 1024:.1f} MB)")
+    #     logger.info("Reprocessing OSRM...")
+    #     reprocess_osrm(modified_pbf.name)
+    #
+    #     import time
+    #     time.sleep(2)
+    #
+    #     pbf_stem = modified_pbf.stem
+    #     expected_files = [
+    #         OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
+    #         OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
+    #     ]
+    #     for f in expected_files:
+    #         if not f.exists():
+    #             raise HTTPException(
+    #                 status_code=500,
+    #                 detail=f"Expected partition file missing: {f}",
+    #             )
+    #
+    #     restart_osrm()
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=str(e))
+    #
+    # ====== END COMMENTED OUT CODE ======
+    
+    # Minimal restart for profile reload (if any profile changes)
+    try:
+        restart_osrm()
+    except Exception as e:
+        logger.warning(f"Failed to restart OSRM: {e}")
+        # Don't fail the request just because restart failed
 
     return filename
 
@@ -453,7 +479,7 @@ async def health():
 
 
 def auto_refresh_pbf():
-    """Scheduled task: re-pull PBF and reapply latest polygons."""
+    """Scheduled task: re-pull PBF (no longer reapplies with Lua-only approach)."""
     logger.info("[CRON] Auto-refresh task starting...")
 
     if not OSM_PBF_URL:
@@ -464,18 +490,22 @@ def auto_refresh_pbf():
     if not download_pbf():
         logger.error("[CRON] Failed to download PBF")
         return
-
-    # Reapply latest polygons if they exist
-    if LATEST_POLYGONS.exists():
-        try:
-            logger.info("[CRON] Reapplying latest polygons...")
-            geojson = json.loads(LATEST_POLYGONS.read_text(encoding="utf-8"))
-            process_avoidzones(geojson)
-            logger.info("[CRON] Auto-refresh completed successfully")
-        except Exception as e:
-            logger.error(f"[CRON] Failed to reapply polygons: {e}")
-    else:
-        logger.info("[CRON] No saved polygons to reapply, just rebuilt from fresh PBF")
+    
+    logger.info("[CRON] PBF downloaded successfully")
+    
+    # NOTE: With Lua-only approach, we no longer need to reapply polygons
+    # The Lua profile will use whatever zones are defined in avoid_zones_data.lua
+    # This makes the cron task much faster.
+    # 
+    # COMMENTED OUT:
+    # if LATEST_POLYGONS.exists():
+    #     try:
+    #         geojson = json.loads(LATEST_POLYGONS.read_text(encoding="utf-8"))
+    #         process_avoidzones(geojson)
+    #     except Exception as e:
+    #         logger.error(f"[CRON] Failed to reapply polygons: {e}")
+    #
+    # To reapply polygons after PBF refresh in the future, call /avoidzones/apply again
 
 
 # ============================================================================

@@ -33,7 +33,7 @@ FROM python:3.13-slim-bookworm
 
 # Install system dependencies for osmium and other packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libexpat1 libproj25 proj-data libc6 \
+    libexpat1 libproj25 proj-data libc6 curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Setup a non-root user

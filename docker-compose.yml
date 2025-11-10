@@ -87,6 +87,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: avoidzones
+    user: "root"
     depends_on:
       - osrm
     environment:
@@ -107,14 +108,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${AVOIDZONES_MEMORY_LIMIT:-16g}
+          memory: ${AVOIDZONES_MEMORY_LIMIT:-8g}
           cpus: ${AVOIDZONES_CPUS_LIMIT:-4.0}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 30s
 
 volumes:
   tiles-db:
