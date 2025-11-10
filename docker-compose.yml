@@ -108,7 +108,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${AVOIDZONES_MEMORY_LIMIT:-8g}
+          memory: ${AVOIDZONES_MEMORY_LIMIT:-16g}
           cpus: ${AVOIDZONES_CPUS_LIMIT:-4.0}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]

@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Literal
 import logging
+import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -29,7 +30,7 @@ OSRM_DATA_DIR = Path(os.getenv("OSRM_DATA", "/data"))
 OSM_PBF_URL = os.getenv("OSM_PBF_URL", "")
 
 # Docker resource limits for OSRM preprocessing
-DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "8g")
+DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "16g")
 DOCKER_CPUS_LIMIT = float(os.getenv("DOCKER_CPUS_LIMIT", "4.0"))
 
 # History and state directories
@@ -287,26 +288,58 @@ def download_pbf():
 # ============================================================================
 
 
+def _apply_pbf_penalties_background():
+    """
+    Background task to apply PBF penalties. This runs in a separate thread
+    to avoid blocking the API and to isolate memory usage.
+    """
+    try:
+        from .cutter import apply_penalties
+        pbf_path = OSRM_DATA_DIR / PBF_NAME
+        modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
+
+        if not pbf_path.exists():
+            logger.error(f"PBF file not found: {pbf_path}")
+            return
+
+        logger.info("[BG] Applying penalties to PBF...")
+        apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf, location_store="flex_mem")
+        logger.info("[BG] Penalties applied successfully")
+
+        size_mb = modified_pbf.stat().st_size / 1024 / 1024
+        logger.info(f"[BG] Modified PBF created ({size_mb:.1f} MB)")
+        logger.info("[BG] Reprocessing OSRM...")
+        reprocess_osrm(modified_pbf.name)
+
+        import time
+        time.sleep(2)
+
+        pbf_stem = modified_pbf.stem
+        expected_files = [
+            OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
+            OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
+        ]
+        for f in expected_files:
+            if not f.exists():
+                logger.error(f"[BG] Expected partition file missing: {f}")
+                return
+
+        logger.info("[BG] Restarting OSRM container...")
+        restart_osrm()
+        logger.info("[BG] PBF reprocessing completed successfully")
+    except Exception as e:
+        logger.error(f"[BG] Error during PBF reprocessing: {e}")
+
+
 def process_avoidzones(geojson: dict) -> str:
     """
     Process avoid zones:
     1. Save the geojson to history
-    2. Convert polygons to Lua format (for potential future use)
-    3. PBF reprocessing is COMMENTED OUT to reduce resource usage
+    2. Convert polygons to Lua format
+    3. Start PBF reprocessing in background thread (non-blocking)
     
-    NOTE: LIMITATION - OSRM's Lua profiles cannot access way node coordinates
-    in the process_way() hook. Therefore, true dynamic polygon checking is not
-    possible without reprocessing the PBF file to add penalty tags.
-    
-    Current behavior:
-    - Saves polygon configuration
-    - Generates Lua data file (for documentation/future use)
-    - Restarts OSRM to pick up profile changes
-    
-    To enable full penalty application, uncomment the PBF reprocessing code
-    below (lines marked COMMENTED OUT).
-    
-    Returns the filename of the saved history entry.
+    Returns the filename of the saved history entry immediately,
+    while PBF reprocessing happens in the background.
     """
     # Validate GeoJSON
     if geojson.get("type") != "FeatureCollection":
@@ -325,7 +358,7 @@ def process_avoidzones(geojson: dict) -> str:
     LATEST_POLYGONS.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
     logger.info(f"Saved as latest polygons: {LATEST_POLYGONS}")
 
-    # Convert to Lua format (for potential future use or documentation)
+    # Convert to Lua format
     lua_zones_file = OSRM_DATA_DIR / "profiles" / "avoid_zones_data.lua"
     try:
         logger.info("Converting polygons to Lua format...")
@@ -337,41 +370,14 @@ def process_avoidzones(geojson: dict) -> str:
         logger.error(f"Failed to convert polygons to Lua: {e}")
         logger.warning("Continuing despite Lua conversion error")
 
-    # Apply PBF reprocessing with penalty tags
-    try:
-        from .cutter import apply_penalties
-        pbf_path = OSRM_DATA_DIR / PBF_NAME
-        modified_pbf = pbf_path.with_stem(f"{pbf_path.stem}_avoidzones")
-
-        if not pbf_path.exists():
-            raise ValueError(f"PBF file not found: {pbf_path}")
-
-        logger.info("Applying penalties to PBF...")
-        apply_penalties(pbf_path, LATEST_POLYGONS, modified_pbf)
-        logger.info("Penalties applied successfully")
-
-        logger.info(f"Modified PBF created ({modified_pbf.stat().st_size / 1024 / 1024:.1f} MB)")
-        logger.info("Reprocessing OSRM...")
-        reprocess_osrm(modified_pbf.name)
-
-        import time
-        time.sleep(2)
-
-        pbf_stem = modified_pbf.stem
-        expected_files = [
-            OSRM_DATA_DIR / f"{pbf_stem}.osrm.hsgr",
-            OSRM_DATA_DIR / f"{pbf_stem}.osrm.prf",
-        ]
-        for f in expected_files:
-            if not f.exists():
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Expected partition file missing: {f}",
-                )
-
-        restart_osrm()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Start PBF reprocessing in background thread (non-blocking)
+    logger.info("Scheduling PBF reprocessing in background...")
+    thread = threading.Thread(
+        target=_apply_pbf_penalties_background,
+        name="PBF-Reprocessing",
+        daemon=True,
+    )
+    thread.start()
 
     return filename
 
