@@ -305,7 +305,7 @@ def _apply_pbf_penalties_background():
 
         logger.info("[BG] Applying penalties to PBF...")
         apply_penalties(
-            pbf_path, LATEST_POLYGONS, modified_pbf, location_store="flex_mem"
+            pbf_path, LATEST_POLYGONS, modified_pbf, location_store="mmap"
         )
         logger.info("[BG] Penalties applied successfully")
 

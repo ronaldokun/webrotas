@@ -47,7 +47,7 @@ class Penalizer(osm.SimpleHandler):
 
     def way(self, w):
         self._way_count += 1
-        if self._way_count % 100000 == 0:
+        if self._way_count % 500000 == 0:
             logger.info(
                 "Processed %d ways (penalized=%d)",
                 self._way_count,
@@ -60,8 +60,8 @@ class Penalizer(osm.SimpleHandler):
             return
         try:
             wkb = self.wkbf.create_linestring(w)
-        except osm.geom.GeometryError:
-            logger.debug("Failed to create linestring for way %d", w.id)
+        except Exception as e:
+            logger.debug("Failed to create linestring for way %d: %s", w.id, str(e))
             self.w.add_way(w)
             return
 
