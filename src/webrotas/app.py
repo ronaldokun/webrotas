@@ -22,6 +22,7 @@ from shapely.strtree import STRtree
 
 # from .cutter import apply_penalties
 from .lua_converter import write_lua_zones_file
+from .version_manager import save_version, load_version, list_versions
 
 # ============================================================================
 # Configuration
@@ -118,9 +119,10 @@ class ApplyResponse(BaseModel):
 
 
 class HistoryItem(BaseModel):
+    version: str
     filename: str
-    ts: str
-    size: int
+    size_bytes: int
+    features_count: int
 
 
 class RevertRequest(BaseModel):
@@ -448,7 +450,7 @@ def load_zones_version(version_id: Optional[str]) -> Dict[str, Any]:
     Load specific avoid zones version from history.
     
     Args:
-        version_id: "latest" or "avoidzones_YYYYMMDD_HHMMSS" (without .geojson)
+        version_id: "latest", "v5", "5", or None for latest version
         
     Returns:
         Parsed GeoJSON dictionary
@@ -457,24 +459,7 @@ def load_zones_version(version_id: Optional[str]) -> Dict[str, Any]:
         FileNotFoundError: If zones version not found
         ValueError: If invalid version format
     """
-    if version_id == "latest" or version_id is None:
-        file_path = LATEST_POLYGONS
-    else:
-        # Validate version_id format to prevent directory traversal
-        if not version_id.startswith("avoidzones_"):
-            raise ValueError(f"Invalid version format: {version_id}")
-        if "." in version_id or "/" in version_id or "\\" in version_id:
-            raise ValueError(f"Invalid version format: {version_id}")
-        file_path = HISTORY_DIR / f"{version_id}.geojson"
-    
-    if not file_path.exists():
-        raise FileNotFoundError(f"Zones version not found: {file_path}")
-    
-    try:
-        geojson = json.loads(file_path.read_text(encoding="utf-8"))
-        return geojson
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in zones file: {e}")
+    return load_version(version_id, HISTORY_DIR)
 
 
 def load_spatial_index(geojson: Dict[str, Any]) -> tuple[List, Optional[STRtree]]:
@@ -569,25 +554,21 @@ def _apply_pbf_penalties_background():
 def process_avoidzones(geojson: dict) -> str:
     """
     Process avoid zones:
-    1. Save the geojson to history
+    1. Save the geojson to history (with deduplication)
     2. Convert polygons to Lua format
     3. Start PBF reprocessing in background thread (non-blocking)
 
-    Returns the filename of the saved history entry immediately,
-    while PBF reprocessing happens in the background.
+    Returns the version identifier (e.g., "v5") of the configuration,
+    which may be an existing duplicate or a newly created version.
+    PBF reprocessing happens in the background for new versions.
     """
     # Validate GeoJSON
     if geojson.get("type") != "FeatureCollection":
         raise ValueError("Expected FeatureCollection")
 
-    # Generate timestamp-based filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"avoidzones_{timestamp}.geojson"
-    history_file = HISTORY_DIR / filename
-
-    # Save to history
-    history_file.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
-    logger.info(f"Saved avoidzones to history: {filename}")
+    # Save to history with deduplication
+    version_filename, is_new_version = save_version(geojson, HISTORY_DIR, check_duplicates=True)
+    logger.info(f"Saved avoidzones version: {version_filename} (new={is_new_version})")
 
     # Save as latest
     LATEST_POLYGONS.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
@@ -605,16 +586,19 @@ def process_avoidzones(geojson: dict) -> str:
         logger.error(f"Failed to convert polygons to Lua: {e}")
         logger.warning("Continuing despite Lua conversion error")
 
-    # Start PBF reprocessing in background thread (non-blocking)
-    logger.info("Scheduling PBF reprocessing in background...")
-    thread = threading.Thread(
-        target=_apply_pbf_penalties_background,
-        name="PBF-Reprocessing",
-        daemon=True,
-    )
-    thread.start()
+    # Start PBF reprocessing in background thread (non-blocking) only for new versions
+    if is_new_version:
+        logger.info("Scheduling PBF reprocessing in background...")
+        thread = threading.Thread(
+            target=_apply_pbf_penalties_background,
+            name="PBF-Reprocessing",
+            daemon=True,
+        )
+        thread.start()
+    else:
+        logger.info(f"Using existing version, skipping PBF reprocessing")
 
-    return filename
+    return version_filename
 
 
 # ============================================================================
@@ -638,20 +622,7 @@ async def apply_avoidzones(fc: FeatureCollection, token: str = Depends(verify_to
 @app.get("/avoidzones/history")
 async def get_history(token: str = Depends(verify_token)):
     """List all saved avoid zones configurations."""
-    items = []
-    if HISTORY_DIR.exists():
-        for f in sorted(HISTORY_DIR.glob("avoidzones_*.geojson"), reverse=True):
-            stat = f.stat()
-            items.append(
-                HistoryItem(
-                    filename=f.name,
-                    ts=datetime.fromtimestamp(stat.st_mtime).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                    size=stat.st_size,
-                )
-            )
-    return items
+    return list_versions(HISTORY_DIR)
 
 
 @app.get("/avoidzones/download/{filename}")
