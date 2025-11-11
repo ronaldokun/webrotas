@@ -75,6 +75,7 @@ services:
     depends_on:
       - osrm
     environment:
+      OSRM_URL: ${OSRM_URL:-http://osrm:5000}
       OSRM_PROFILE: ${OSRM_PROFILE}
       PBF_NAME: ${PBF_NAME}
       OSRM_BASE: ${OSRM_BASE}

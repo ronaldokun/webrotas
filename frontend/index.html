@@ -27,6 +27,22 @@
         </div>
 
         <div class="sec">
+            <strong>Avoid Zones Routing</strong><br>
+            <div>Zones Version:
+                <select id="zones-version" style="width: 100%;">
+                    <option value="latest">Latest</option>
+                </select>
+            </div>
+            <div style="margin-top: 8px;">Avoid Mode:
+                <select id="avoid-mode" style="width: 100%;">
+                    <option value="penalize">Penalize (score routes)</option>
+                    <option value="filter">Filter (exclude routes in zones)</option>
+                </select>
+            </div>
+            <div id="zones-info" style="font-size: 0.85em; color: #666; margin-top: 8px;"></div>
+        </div>
+
+        <div class="sec">
             <strong>Quick Route</strong><br>
             <div>Lng,Lat A: <input id="a" value="-46.70,-23.55"></div>
             <div>Lng,Lat B: <input id="b" value="-46.63,-23.55"></div>
@@ -44,9 +60,15 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="./leaflet.draw.js"></script>
     <script>
+        // Docker Compose service names; localhost for local development
         const TILE_URL = 'http://localhost:8090/tile/{z}/{x}/{y}.png';
         const OSRM_URL = 'http://localhost:5000';
         const API_URL = 'http://localhost:9090';
+        
+        // For Docker Compose internal networking, uncomment:
+        // const OSRM_URL = 'http://osrm:5000';
+        // const API_URL = 'http://avoidzones:9090';
+        // const TILE_URL = 'http://osmtiles:80/tile/{z}/{x}/{y}.png';
 
         console.log('Leaflet version:', L.version);
         console.log('L.Draw available?', typeof L.Draw !== 'undefined');
@@ -85,17 +107,130 @@
             routeLayer.clearLayers();
             const a = document.getElementById('a').value.trim();
             const b = document.getElementById('b').value.trim();
-            const url = `${OSRM_URL}/route/v1/driving/${a};${b}?overview=full&geometries=geojson`;
-            const res = await fetch(url); const json = await res.json();
-            if (!json.routes?.length) { alert('No route found'); return; }
-            const r = json.routes[0];
-            routeLayer.addData({ type: 'Feature', geometry: r.geometry });
-            const [minLng, minLat, maxLng, maxLat] = bbox(r.geometry.coordinates);
-            map.fitBounds([[minLat, minLng], [maxLat, maxLng]]);
-            document.getElementById('dur').textContent = (r.duration / 60).toFixed(1) + ' min';
-            document.getElementById('dist').textContent = (r.distance / 1000).toFixed(1) + ' km';
+            const zonesVersion = document.getElementById('zones-version').value || 'latest';
+            const avoidMode = document.getElementById('avoid-mode').value || 'penalize';
+            
+            try {
+                const a_coords = a.split(',').map(Number);
+                const b_coords = b.split(',').map(Number);
+                
+                const data = await routeWithZones(a_coords, b_coords, zonesVersion, avoidMode);
+                
+                if (!data.routes || data.routes.length === 0) {
+                    alert('No route found');
+                    return;
+                }
+                
+                // Display all route variants with color coding
+                data.routes.forEach((route, idx) => {
+                    const penalties = route.penalties || { zone_intersections: 0, intersection_length_km: 0, penalty_score: 0 };
+                    const layer = visualizeRoutePenalties(route, penalties, idx === 0);
+                    layer.addTo(routeLayer);
+                });
+                
+                // Show best route details
+                const bestRoute = data.routes[0];
+                document.getElementById('dur').textContent = (bestRoute.duration / 60).toFixed(1) + ' min';
+                document.getElementById('dist').textContent = (bestRoute.distance / 1000).toFixed(1) + ' km';
+                
+                // Display zone info
+                if (data.zones_applied) {
+                    document.getElementById('zones-info').textContent = 
+                        `Using zones: ${data.zones_applied.version} (${data.zones_applied.polygon_count} zones)`;
+                }
+                
+                // Fit map to route bounds
+                const coords = bestRoute.geometry.coordinates;
+                const bounds = bbox(coords);
+                map.fitBounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]]);
+                
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
         }
         function bbox(coords) { let mnL = 1e9, mnB = 1e9, mxL = -1e9, mxB = -1e9; for (const [x, y] of coords) { if (x < mnL) mnL = x; if (y < mnB) mnB = y; if (x > mxL) mxL = x; if (y > mxB) mxB = y } return [mnL, mnB, mxL, mxB] }
+
+        // Phase 2: Client-side zone routing functions
+        async function routeWithZones(start, end, zonesVersion = 'latest', avoidMode = 'penalize') {
+            const coords = `${start[0]},${start[1]};${end[0]},${end[1]}`;
+            try {
+                const params = new URLSearchParams({
+                    zones_version: zonesVersion,
+                    avoid_mode: avoidMode,
+                    alternatives: 3
+                });
+                const response = await fetch(`${API_URL}/route/v1/driving/${coords}?${params}`);
+                if (!response.ok) throw new Error(`Route request failed: ${response.status}`);
+                const data = await response.json();
+                console.log('Zone Penalties:', data.intersection_info);
+                // Routes already sorted by penalty in endpoint, but sort again for safety
+                if (avoidMode === 'penalize' && data.routes) {
+                    data.routes.sort((a, b) => 
+                        (a.penalties?.penalty_score || 0) - (b.penalties?.penalty_score || 0)
+                    );
+                }
+                return data;
+            } catch (error) {
+                console.error('Route request error:', error);
+                throw error;
+            }
+        }
+
+        function visualizeRoutePenalties(route, penalties, isFirst = false) {
+            const color = penalties.penalty_score > 0.5 ? '#ff0000' : 
+                          penalties.penalty_score > 0.2 ? '#ff9900' : 
+                          '#00aa00';
+            const line = L.geoJSON(
+                { type: 'Feature', geometry: route.geometry },
+                {
+                    style: {
+                        color: color,
+                        weight: isFirst ? 6 : 3,
+                        opacity: isFirst ? 0.9 : 0.5,
+                        dashArray: penalties.zone_intersections > 0 ? '5, 5' : ''
+                    }
+                }
+            );
+            const popup = L.popup().setContent(`
+                <b>Route Statistics</b><br/>
+                Distance: ${(route.distance / 1000).toFixed(1)} km<br/>
+                Duration: ${(route.duration / 60).toFixed(1)} min<br/>
+                <hr/>
+                <b>Avoid Zones Impact</b><br/>
+                Intersections: ${penalties.zone_intersections}<br/>
+                Length in zones: ${penalties.intersection_length_km.toFixed(2)} km<br/>
+                Penalty score: ${(penalties.penalty_score * 100).toFixed(1)}%
+            `);
+            line.bindPopup(popup);
+            return line;
+        }
+
+        async function populateZonesHistory() {
+            const versions = document.getElementById('zones-version');
+            const currentValue = versions.value;
+            // Keep 'latest' option
+            const options = versions.querySelectorAll('option');
+            for (let i = options.length - 1; i > 0; i--) {
+                versions.removeChild(options[i]);
+            }
+            
+            try {
+                const response = await fetch(`${API_URL}/avoidzones/history`, { headers: authHeaders() });
+                if (!response.ok) return;
+                const history = await response.json();
+                
+                // Add historical versions (most recent first)
+                history.forEach(item => {
+                    const option = document.createElement('option');
+                    const versionId = item.filename.replace('.geojson', '').replace('avoidzones_', '');
+                    option.value = versionId;
+                    option.textContent = `${item.ts}`;
+                    versions.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Failed to load zone history:', error);
+            }
+        }
 
         document.getElementById('route').onclick = doRoute;
 
@@ -116,6 +251,7 @@
             status(j.status || 'done');
             alert('Applied. OSRM rebuilt. Try routing again.');
             await refreshHistory();
+            await populateZonesHistory();  // Update zones dropdown
         };
 
         async function refreshHistory() {
@@ -183,6 +319,7 @@
         }
         document.getElementById('refresh-history').onclick = refreshHistory;
         refreshHistory();
+        populateZonesHistory();  // Initialize zones dropdown
     </script>
 </body>
 
