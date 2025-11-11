@@ -5,15 +5,20 @@ import docker
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional
 import logging
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+# Client-side zone processing imports
+import httpx
+from shapely.geometry import LineString, shape
+from shapely.strtree import STRtree
 
 # from .cutter import apply_penalties
 from .lua_converter import write_lua_zones_file
@@ -28,6 +33,9 @@ OSRM_BASE = os.getenv("OSRM_BASE", "region")
 AVOIDZONES_TOKEN = os.getenv("AVOIDZONES_TOKEN", "default-token")
 OSRM_DATA_DIR = Path(os.getenv("OSRM_DATA", "/data"))
 OSM_PBF_URL = os.getenv("OSM_PBF_URL", "")
+
+# OSRM server URL for routing requests
+OSRM_URL = os.getenv("OSRM_URL", "http://localhost:5000")
 
 # Docker resource limits for OSRM preprocessing
 DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "16g")
@@ -117,6 +125,27 @@ class HistoryItem(BaseModel):
 
 class RevertRequest(BaseModel):
     filename: str
+
+
+class IntersectionInfo(BaseModel):
+    """Information about route intersection with avoid zones."""
+    intersection_count: int
+    total_length_km: float
+    penalty_ratio: float
+    route_length_km: float
+
+
+class ZonesAppliedInfo(BaseModel):
+    """Metadata about the avoid zones configuration applied to routing."""
+    version: str
+    polygon_count: int
+
+
+class RouteWithZonesResponse(BaseModel):
+    """Response model for route with zones filtering."""
+    routes: List[Dict[str, Any]]
+    zones_applied: ZonesAppliedInfo
+    intersection_info: Dict[str, IntersectionInfo]
 
 
 # ============================================================================
@@ -281,6 +310,208 @@ def download_pbf():
         if pbf_tmp.exists():
             pbf_tmp.unlink()
         return False
+
+
+# ============================================================================
+# OSRM Proxy Handler
+# ============================================================================
+
+
+async def request_osrm(
+    coordinates: str,
+    alternatives: int = 1,
+    overview: str = "full",
+    geometries: str = "geojson",
+) -> Dict[str, Any]:
+    """
+    Request route from OSRM with specified parameters.
+    
+    Args:
+        coordinates: OSRM format coordinates "lng1,lat1;lng2,lat2"
+        alternatives: Number of alternative routes (1-3)
+        overview: Detail level ("simplified", "full", "false")
+        geometries: Geometry format ("geojson", "polyline", "polyline6")
+        
+    Returns:
+        OSRM response as dictionary
+        
+    Raises:
+        HTTPException: On connection or OSRM errors
+    """
+    try:
+        url = f"{OSRM_URL}/route/v1/driving/{coordinates}"
+        
+        params = {
+            "alternatives": alternatives,
+            "overview": overview,
+            "geometries": geometries,
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            logger.info(f"Requesting route from OSRM: {url}")
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            
+            data = response.json()
+            logger.info(f"OSRM returned {len(data.get('routes', []))} routes")
+            return data
+            
+    except httpx.HTTPError as e:
+        logger.error(f"OSRM HTTP error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"OSRM routing request failed: {str(e)}",
+        )
+    except Exception as e:
+        logger.error(f"Error requesting OSRM: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error requesting OSRM: {str(e)}",
+        )
+
+
+# ============================================================================
+# Client-Side Zone Processing Helpers
+# ============================================================================
+
+
+def check_route_intersections(coords: List[List[float]], polygons: List, tree: Optional[STRtree]) -> Dict[str, Any]:
+    """
+    Calculate route-polygon intersections for a given route and set of avoid zone polygons.
+    
+    Args:
+        coords: List of [longitude, latitude] coordinates forming the route
+        polygons: List of shapely polygon objects representing avoid zones
+        tree: STRtree spatial index of polygons (or None if no polygons)
+        
+    Returns:
+        Dictionary with intersection statistics:
+        - intersection_count: Number of polygons route intersects
+        - total_length_km: Total length of route within avoid zones
+        - penalty_ratio: Fraction of route within zones (0.0-1.0)
+        - route_length_km: Total route length in kilometers
+    """
+    if not polygons or tree is None:
+        return {
+            "intersection_count": 0,
+            "total_length_km": 0.0,
+            "penalty_ratio": 0.0,
+            "route_length_km": 0.0,
+        }
+    
+    try:
+        route_line = LineString(coords)
+        intersection_count = 0
+        total_intersection_length = 0
+        
+        # Query spatial index for candidate polygons
+        candidate_indices = tree.query(route_line)
+        
+        for idx in candidate_indices:
+            polygon = polygons[idx]
+            if route_line.intersects(polygon):
+                intersection_count += 1
+                intersection = route_line.intersection(polygon)
+                # Handle both Point and LineString/MultiLineString intersections
+                if hasattr(intersection, 'length'):
+                    total_intersection_length += intersection.length
+        
+        total_route_length = route_line.length
+        penalty_ratio = (
+            total_intersection_length / total_route_length 
+            if total_route_length > 0 
+            else 0.0
+        )
+        
+        # Convert to km for readability
+        total_intersection_km = total_intersection_length / 1000
+        route_length_km = total_route_length / 1000
+        
+        return {
+            "intersection_count": intersection_count,
+            "total_length_km": round(total_intersection_km, 3),
+            "penalty_ratio": min(penalty_ratio, 1.0),  # Cap at 100%
+            "route_length_km": round(route_length_km, 3),
+        }
+    except Exception as e:
+        logger.error(f"Error calculating route intersections: {e}")
+        return {
+            "intersection_count": 0,
+            "total_length_km": 0.0,
+            "penalty_ratio": 0.0,
+            "route_length_km": 0.0,
+        }
+
+
+def load_zones_version(version_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Load specific avoid zones version from history.
+    
+    Args:
+        version_id: "latest" or "avoidzones_YYYYMMDD_HHMMSS" (without .geojson)
+        
+    Returns:
+        Parsed GeoJSON dictionary
+        
+    Raises:
+        FileNotFoundError: If zones version not found
+        ValueError: If invalid version format
+    """
+    if version_id == "latest" or version_id is None:
+        file_path = LATEST_POLYGONS
+    else:
+        # Validate version_id format to prevent directory traversal
+        if not version_id.startswith("avoidzones_"):
+            raise ValueError(f"Invalid version format: {version_id}")
+        if "." in version_id or "/" in version_id or "\\" in version_id:
+            raise ValueError(f"Invalid version format: {version_id}")
+        file_path = HISTORY_DIR / f"{version_id}.geojson"
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Zones version not found: {file_path}")
+    
+    try:
+        geojson = json.loads(file_path.read_text(encoding="utf-8"))
+        return geojson
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in zones file: {e}")
+
+
+def load_spatial_index(geojson: Dict[str, Any]) -> tuple[List, Optional[STRtree]]:
+    """
+    Build spatial index from GeoJSON for fast polygon queries.
+    
+    Args:
+        geojson: GeoJSON FeatureCollection or Feature
+        
+    Returns:
+        Tuple of (list of shapely polygons, STRtree spatial index)
+        Returns ([], None) if no valid polygons found
+    """
+    try:
+        features = geojson.get("features", []) if geojson.get("type") == "FeatureCollection" else [geojson]
+        
+        polys = []
+        for feature in features:
+            geom = feature.get("geometry")
+            if geom and geom.get("type") in ("Polygon", "MultiPolygon"):
+                try:
+                    poly = shape(geom)
+                    if poly.is_valid:
+                        polys.append(poly)
+                except Exception as e:
+                    logger.warning(f"Could not convert geometry to polygon: {e}")
+                    continue
+        
+        if not polys:
+            logger.info("No valid polygons found in GeoJSON")
+            return [], None
+        
+        tree = STRtree(polys)
+        return polys, tree
+    except Exception as e:
+        logger.error(f"Error building spatial index: {e}")
+        return [], None
 
 
 # ============================================================================
@@ -463,6 +694,113 @@ async def revert_avoidzones(req: RevertRequest, token: str = Depends(verify_toke
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/route/v1/driving/{coordinates}")
+async def route_with_zones(
+    coordinates: str,
+    zones_version: Optional[str] = Query(None, description="Avoid zones version ID (latest or avoidzones_YYYYMMDD_HHMMSS)"),
+    avoid_mode: str = Query("penalize", description="'filter' (exclude routes) or 'penalize' (score routes)"),
+    alternatives: int = Query(1, ge=1, le=3, description="Number of alternative routes"),
+) -> Dict[str, Any]:
+    """
+    Route with client-side avoid zones filtering.
+    
+    Request route from OSRM, then filter/penalize based on avoid zones.
+    
+    Args:
+        coordinates: OSRM format "lng1,lat1;lng2,lat2"
+        zones_version: Avoid zones config to use ("latest" or version ID)
+        avoid_mode: "filter" (exclude routes in zones) or "penalize" (return all routes with scores)
+        alternatives: Number of alternative routes (1-3)
+        
+    Returns:
+        OSRM response with added penalties and zones metadata
+    """
+    try:
+        # Validate avoid_mode
+        if avoid_mode not in ("filter", "penalize"):
+            raise HTTPException(
+                status_code=400,
+                detail="avoid_mode must be 'filter' or 'penalize'",
+            )
+        
+        # Load zones configuration
+        logger.info(f"Loading zones version: {zones_version or 'latest'}")
+        geojson = load_zones_version(zones_version)
+        polys, tree = load_spatial_index(geojson)
+        
+        polygon_count = len(polys)
+        logger.info(f"Loaded {polygon_count} avoid zone polygons")
+        
+        # Request route from OSRM
+        logger.info(f"Requesting {alternatives} route(s) from OSRM")
+        osrm_response = await request_osrm(
+            coordinates,
+            alternatives=alternatives,
+            overview="full",
+            geometries="geojson",
+        )
+        
+        if not osrm_response.get("routes"):
+            logger.warning("No routes found from OSRM")
+            return osrm_response
+        
+        # Process routes through zones
+        processed_routes = []
+        intersection_info = {}
+        
+        for idx, route in enumerate(osrm_response["routes"]):
+            coords = route["geometry"]["coordinates"]
+            intersection_data = check_route_intersections(coords, polys, tree)
+            
+            # Apply avoid mode logic
+            if avoid_mode == "filter" and intersection_data["intersection_count"] > 0:
+                logger.info(f"Route {idx} filtered (crosses {intersection_data['intersection_count']} zones)")
+                continue  # Skip routes with intersections
+            elif avoid_mode == "penalize":
+                # Add penalty information to route
+                if "penalties" not in route:
+                    route["penalties"] = {}
+                route["penalties"] = {
+                    "zone_intersections": intersection_data["intersection_count"],
+                    "intersection_length_km": intersection_data["total_length_km"],
+                    "penalty_score": intersection_data["penalty_ratio"],
+                }
+            
+            processed_routes.append(route)
+            intersection_info[f"route_{len(processed_routes)-1}"] = intersection_data
+        
+        # Sort routes by penalty score (best first)
+        if avoid_mode == "penalize":
+            processed_routes.sort(
+                key=lambda r: r.get("penalties", {}).get("penalty_score", 0)
+            )
+        
+        # Return processed response
+        osrm_response["routes"] = processed_routes
+        osrm_response["zones_applied"] = {
+            "version": zones_version or "latest",
+            "polygon_count": polygon_count,
+        }
+        osrm_response["intersection_info"] = intersection_info
+        
+        logger.info(
+            f"Returning {len(processed_routes)} route(s) with {polygon_count} zones applied"
+        )
+        return osrm_response
+        
+    except FileNotFoundError as e:
+        logger.error(f"Zones file not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Invalid version format: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in route_with_zones: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Routing failed: {str(e)}")
 
 
 # ============================================================================

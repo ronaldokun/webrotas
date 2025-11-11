@@ -1,21 +1,5 @@
 services:
-  # pbf_fetcher:
-  #   image: curlimages/curl:8.10.1
-  #   container_name: pbf_fetcher
-  #   command: >
-  #     sh -lc "
-  #       set -euo pipefail;
-  #       echo '[pbf_fetcher] Downloading ${OSM_PBF_URL} -> /data/${PBF_NAME}';
-  #       curl -L --fail --max-time 3600 --connect-timeout 30 -C - --output /data/${PBF_NAME}.tmp '${OSM_PBF_URL}';
-  #       mv /data/${PBF_NAME}.tmp /data/${PBF_NAME};
-  #       ls -lh /data/${PBF_NAME};
-  #       echo '[pbf_fetcher] Done.'
-  #     "
-  #   env_file: .env
-  #   volumes:
-  #     - ${OSRM_DATA}:/data
-  #   restart: "no"
-
+  
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:latest
     container_name: osrm

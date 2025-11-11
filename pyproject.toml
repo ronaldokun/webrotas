@@ -12,6 +12,7 @@ dependencies = [
     "apscheduler>=3.11.1",
     "docker>=7.1.0",
     "fastapi[standard]>=0.121.0",
+    "httpx>=0.24.0",
     "osmium>=4.2.0",
     "shapely>=2.1.2",
     "uvicorn[standard]>=0.38.0",
